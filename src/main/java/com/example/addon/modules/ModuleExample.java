@@ -2,65 +2,122 @@ package com.example.addon.modules;
 
 import com.example.addon.AddonTemplate;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.events.entity.player.StartBreakingBlockEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
-import meteordevelopment.meteorclient.settings.ColorSetting;
-import meteordevelopment.meteorclient.settings.DoubleSetting;
-import meteordevelopment.meteorclient.settings.Setting;
-import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
+import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
+
+import java.util.ArrayList;
+import java.util.List;
 
 public class ModuleExample extends Module {
     private final SettingGroup sgGeneral = this.settings.getDefaultGroup();
     private final SettingGroup sgRender = this.settings.createGroup("Render");
 
-    /**
-     * Example setting.
-     * The {@code name} parameter should be in kebab-case.
-     * If you want to access the setting from another class, simply make the setting {@code public}, and use
-     * {@link meteordevelopment.meteorclient.systems.modules.Modules#get(Class)} to access the {@link Module} object.
-     */
-    private final Setting<Double> scale = sgGeneral.add(new DoubleSetting.Builder()
-        .name("scale")
-        .description("The size of the marker.")
-        .defaultValue(2.0d)
-        .range(0.5d, 10.0d)
+    private final Setting<Integer> tickDelay = sgGeneral.add(new IntSetting.Builder()
+        .name("delay")
+        .description("The delay between break attempts.")
+        .defaultValue(0)
+        .min(0)
+        .sliderMax(20)
+        .build()
+    );
+
+    private final Setting<Boolean> pick = sgGeneral.add(new BoolSetting.Builder()
+        .name("only-pick")
+        .description("Only mine if holding a pickaxe.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
+        .name("rotate")
+        .description("Rotate to the block being mined.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> renderBlocks = sgRender.add(new BoolSetting.Builder()
+        .name("render")
+        .description("Render the blocks being mined.")
+        .defaultValue(true)
         .build()
     );
 
     private final Setting<SettingColor> color = sgRender.add(new ColorSetting.Builder()
         .name("color")
-        .description("The color of the marker.")
+        .description("The color of the blocks.")
         .defaultValue(Color.MAGENTA)
         .build()
     );
 
-    /**
-     * The {@code name} parameter should be in kebab-case.
-     */
+    private int ticks = 0;
+
+    // Multi-block support
+    private final List<BlockPos> targetBlocks = new ArrayList<>();
+    private Direction direction;
+
     public ModuleExample() {
-        super(AddonTemplate.CATEGORY, "world-origin", "An example module that highlights the center of the world.");
+        super(AddonTemplate.CATEGORY, "multi-instant-rebreak", "Instantly re-breaks multiple blocks.");
     }
 
-    /**
-     * Example event handling method.
-     * Requires {@link AddonTemplate#getPackage()} to be setup correctly, otherwise the game will crash whenever the module is enabled.
-     */
-    @EventHandler
-    private void onRender3d(Render3DEvent event) {
-        // Create & stretch the marker object
-        Box marker = new Box(BlockPos.ORIGIN);
-        marker = marker.stretch(
-            scale.get() * marker.getLengthX(),
-            scale.get() * marker.getLengthY(),
-            scale.get() * marker.getLengthZ()
-        );
+    @Override
+    public void onActivate() {
+        ticks = 0;
+        targetBlocks.clear();
+    }
 
-        // Render the marker based on the color setting
-        event.renderer.box(marker, color.get(), color.get(), ShapeMode.Both, 0);
+    @EventHandler
+    private void onStartBreakingBlock(StartBreakingBlockEvent event) {
+        direction = event.direction;
+        if (!targetBlocks.contains(event.blockPos)) targetBlocks.add(event.blockPos);
+    }
+
+    @EventHandler
+    private void onTick(TickEvent.Pre event) {
+        if (ticks >= tickDelay.get()) {
+            ticks = 0;
+            List<BlockPos> toRemove = new ArrayList<>();
+            for (BlockPos pos : targetBlocks) {
+                if (shouldMine(pos)) {
+                    if (rotate.get()) Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), this::sendPacket);
+                    else sendPacket(pos);
+
+                    mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
+                } else {
+                    toRemove.add(pos);
+                }
+            }
+            targetBlocks.removeAll(toRemove);
+        } else ticks++;
+    }
+
+    private void sendPacket(BlockPos pos) {
+        mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, direction == null ? Direction.UP : direction));
+    }
+
+    private boolean shouldMine(BlockPos pos) {
+        if (mc.world.isOutOfHeightLimit(pos) || !BlockUtils.canBreak(pos)) return false;
+        return !pick.get() || mc.player.getMainHandStack().isIn(ItemTags.PICKAXES);
+    }
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (!renderBlocks.get()) return;
+        for (BlockPos pos : targetBlocks) {
+            event.renderer.box(pos, color.get(), color.get(), ShapeMode.Both, 0);
+        }
     }
 }
